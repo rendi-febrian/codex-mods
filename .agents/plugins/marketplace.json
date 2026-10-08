@@ -1,0 +1,20 @@
+{
+  "name": "rendifebrian-codex-mods",
+  "interface": {
+    "displayName": "Rendifebrian Codex Mods"
+  },
+  "plugins": [
+    {
+      "name": "codex-context-bar",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex-context-bar"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

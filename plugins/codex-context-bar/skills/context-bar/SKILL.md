@@ -96,10 +96,25 @@ Rates are not invented. `~/.codex/context-bar.json` holds them, and
 }
 ```
 
-`[input, output, cached_read, cache_write]` in USD per million tokens; the key
-is matched as a substring of the model slug, most specific match first. If no
-rate matches the session's model, report tokens only and say the cost needs
-rates — never state a dollar figure you did not compute.
+`[input, output, cached_read, cache_write]` in USD per million tokens. The key is
+matched as a substring of the model slug and **the longest matching key wins**
+— with both `gpt-6` and `gpt-6-luna` in the table, `gpt-6-luna` bills, whatever
+order they were written in. Do not put a broad key like `gpt-6` in the table to
+cover a family: it silently swallows every specific key shorter than a real
+slug, and it is a price nobody published. `default` is the fallback for a model
+nothing matches.
+
+Never invent a rate, and never invent a model name to put one under. If no key
+matches, report tokens only and say the cost needs rates — a confident `$0.00`
+is worse than "no rates".
+
+## The model per call, not per session
+
+`usage` in a `token_usage_record` does **not** name the model — only
+`turn_context` does, and a session can switch models mid-way. So the model in
+force has to be tracked as the file is read, and each call billed at the rate of
+the model that was current when it happened. Assuming one model for the whole
+session overprices (or underprices) every call after a switch.
 
 OpenAI bills a request whose prompt passes the threshold (272,000 tokens for the
 GPT-6 family) at 2× input and cache rates and 1.5× output for the whole

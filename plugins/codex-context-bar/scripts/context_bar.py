@@ -28,8 +28,10 @@ Usage
   context_bar.py                 latest session, one-line bar
   context_bar.py --ledger        also the last 12 turns
   context_bar.py --session <id>  a specific session id (prefix is enough)
-  context_bar.py --prices gpt-6=1.25/10/0.125
-                                 rates per million tokens: in/out/cached
+  context_bar.py --prices gpt-6-luna=0.1/0.5/0.01/0.125
+                                 rates per million tokens: in/out/cached[/cacheWrite]
+  context_bar.py --config none   ignore ~/.codex/context-bar.json
+  context_bar.py --window N      override the context window
   context_bar.py --json          machine-readable
 """
 
@@ -44,9 +46,10 @@ from datetime import datetime, timezone
 
 SESSIONS_ROOT = os.path.expanduser("~/.codex/sessions")
 CONFIG_PATH = os.path.expanduser("~/.codex/context-bar.json")
+MODELS_CACHE = os.path.expanduser("~/.codex/models_cache.json")
 
-# Context windows, for sessions whose rollout does not name one. Override a
-# model here or in ~/.codex/context-bar.json ({"windows": {"<model>": 400000}}).
+# Context windows, for sessions whose rollout does not name one and whose model
+# is not in Codex's own catalog. ~/.codex/context-bar.json can override either.
 WINDOWS = {
     "gpt-6": 258400,
     "gpt-5": 258400,
@@ -203,29 +206,97 @@ def sparkline(turns: list[dict]) -> str:
 
 
 def rates_for(model: str | None, table: dict) -> list[float] | None:
+    """The most specific match wins; 'default' only when nothing else does."""
     if not table:
         return None
     for key, value in table.items():
-        if key == "default" or (model and key.lower() in model.lower()):
+        if key != "default" and model and key.lower() in model.lower():
             return value
     return table.get("default")
 
 
-def estimate(turns: list[dict], rates) -> float | None:
+def model_catalog() -> dict:
+    """{slug: {window, raw_window, fraction}} from Codex's own model cache.
+
+    Codex writes ~/.codex/models_cache.json; `context_window` is the model's
+    window and `effective_context_window_percent` is how much of it a session
+    actually gets (95 for the GPT-6 family: 272000 x 0.95 = 258400). Reading it
+    means a new model is right without editing this script.
+    """
+    try:
+        with open(MODELS_CACHE, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for m in data.get("models") or []:
+        slug, window = m.get("slug"), m.get("context_window")
+        if not slug or not window:
+            continue
+        fraction = m.get("effective_context_window_percent") or 0
+        out[slug] = {
+            "window": int(window * (fraction / 100)) if fraction else int(window),
+            "raw_window": int(window),
+            "fraction": fraction,
+        }
+    return out
+
+
+# A request past the threshold bills at these multipliers for the whole
+# request. They are OpenAI's published rule, so they are defaults here rather
+# than something the user has to configure; ~/.codex/context-bar.json can
+# still override any of them.
+LONG_CONTEXT_DEFAULTS = {
+    "threshold_tokens": 272000,
+    "input_multiplier": 2.0,
+    "cached_multiplier": 2.0,
+    "output_multiplier": 1.5,
+}
+
+
+def long_context(config: dict) -> dict:
+    """The multiplier a request past the threshold is billed at."""
+    lc = {**LONG_CONTEXT_DEFAULTS, **(config.get("long_context") or {})}
+    return {
+        "threshold": int(lc.get("threshold_tokens") or 0),
+        "in_mult": float(lc.get("input_multiplier") or 1.0),
+        "cached_mult": float(lc.get("cached_multiplier") or 1.0),
+        "out_mult": float(lc.get("output_multiplier") or 1.0),
+    }
+
+
+def estimate(turns: list[dict], rates, config: dict | None = None) -> float | None:
+    """Cost of the turns, with the long-context multiplier where it applies.
+
+    The multiplier is judged per request, and a turn's window is its last
+    call's input side, so that is what the threshold is measured against.
+    """
     if not rates:
         return None
     in_rate, out_rate, cached_rate = (list(rates) + [0, 0, 0])[:3]
+    lc = long_context(config or {})
     total = 0.0
     for t in turns:
+        mult_in = mult_cached = mult_out = 1.0
+        if lc["threshold"] and t["context_tokens"] > lc["threshold"]:
+            mult_in, mult_cached, mult_out = lc["in_mult"], lc["cached_mult"], lc["out_mult"]
         uncached = max(0, t["input"] - t["cached"])
-        total += uncached / 1e6 * in_rate
-        total += t["cached"] / 1e6 * cached_rate
-        total += t["output"] / 1e6 * out_rate
+        total += uncached / 1e6 * in_rate * mult_in
+        total += t["cached"] / 1e6 * cached_rate * mult_cached
+        total += t["output"] / 1e6 * out_rate * mult_out
     return total
 
 
 def windows_table(config: dict) -> dict:
+    """Windows by model: this script's table, then Codex's catalog, then config.
+
+    Precedence is deliberate — the script's table is the fallback for a machine
+    with no catalog, Codex's own cache is authoritative when it has the model,
+    and the user's config overrides both.
+    """
     table = dict(WINDOWS)
+    for slug, info in model_catalog().items():
+        table[slug] = info["window"]
     table.update({k: int(v) for k, v in (config.get("windows") or {}).items()})
     return table
 
@@ -234,15 +305,20 @@ def window_for(model, config: dict, meta: dict) -> int:
     if meta.get("model_context_window"):
         return int(meta["model_context_window"])
     table = windows_table(config)
+    if model and model in table:
+        return int(table[model])
     for key, value in table.items():
-        if key == "default" or (model and key.lower() in model.lower()):
+        if key != "default" and model and key.lower() in model.lower():
             return int(value)
     return int(table.get("default", 0))
 
 
-def load_config() -> dict:
+def load_config(path: str | None = None) -> dict:
+    target = path or CONFIG_PATH
+    if target in ("", "none"):
+        return {}
     try:
-        with open(CONFIG_PATH, encoding="utf-8") as fh:
+        with open(target, encoding="utf-8") as fh:
             data = json.load(fh)
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
@@ -250,22 +326,26 @@ def load_config() -> dict:
 
 
 def parse_prices(spec: str | None, config: dict) -> dict:
+    """Rates by model key. `--prices` wins over the config file for its models.
+
+    The spec goes in first so it is the first key the matcher sees: a later
+    duplicate cannot shadow an explicit command-line rate.
+    """
     table: dict[str, list[float]] = {}
+    for part in (spec or "").split(","):
+        if "=" not in part:
+            continue
+        name, nums = part.split("=", 1)
+        table[name.strip()] = [float(x) for x in nums.replace("/", " ").split()]
     for key, value in (config.get("prices") or {}).items():
-        table[key] = [float(x) for x in value]
-    if spec:
-        for part in spec.split(","):
-            if "=" not in part:
-                continue
-            name, nums = part.split("=", 1)
-            table[name.strip()] = [float(x) for x in nums.replace("/", " ").split()]
+        table.setdefault(key, [float(x) for x in value])
     return table
 
 
 # ---------- output ----------------------------------------------------------
 
 
-def band_line(session: dict, turns: list[dict], rates) -> str:
+def band_line(session: dict, turns: list[dict], rates, config: dict) -> str:
     window = session.get("window") or 0
     last = turns[-1] if turns else None
     context = last["context_tokens"] if last else 0
@@ -273,7 +353,7 @@ def band_line(session: dict, turns: list[dict], rates) -> str:
     icon, word, _ = weather_for(percent)
     sent = sum(t["input"] for t in turns)
     got = sum(t["output"] for t in turns)
-    est = estimate(turns, rates)
+    est = estimate(turns, rates, config)
     model = session.get("model") or "?"
 
     calls = sum(t["calls"] for t in turns)
@@ -291,7 +371,7 @@ def band_line(session: dict, turns: list[dict], rates) -> str:
     return "".join(parts)
 
 
-def ledger_lines(turns: list[dict], rates) -> list[str]:
+def ledger_lines(turns: list[dict], rates, config: dict) -> list[str]:
     out = []
     for i, t in enumerate(turns[-SPARK_TURNS:], 1):
         row = (
@@ -300,8 +380,7 @@ def ledger_lines(turns: list[dict], rates) -> list[str]:
             f"  cache ↺{compact(t['cached']):>7}  calls {t['calls']:>2}"
         )
         if rates:
-            per = estimate([t], rates)
-            row += f"  {money(per)}"
+            row += f"  {money(estimate([t], rates, config))}"
         out.append(row)
     return out
 
@@ -312,6 +391,18 @@ def main(argv=None) -> int:
     parser.add_argument("--ledger", action="store_true", help="print the per-turn ledger")
     parser.add_argument("--prices", help="rates per Mtok, e.g. gpt-6=1.25/10/0.125")
     parser.add_argument("--window", type=int, help="override the context window size")
+    parser.add_argument(
+        "--config",
+        default=CONFIG_PATH,
+        help="rate table to read (default ~/.codex/context-bar.json; 'none' for built-ins only)",
+    )
+    parser.add_argument(
+        "--long-threshold",
+        type=int,
+        help="override the long-context threshold in tokens (0 disables it)",
+    )
+    parser.add_argument("--card", action="store_true", help="write the inline card and print its reference")
+    parser.add_argument("--card-out", help="where to write the card (default: the thread's visualizations dir, else cwd)")
     parser.add_argument("--watch", type=float, metavar="SECONDS", help="redraw every N seconds")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     args = parser.parse_args(argv)
@@ -323,7 +414,12 @@ def main(argv=None) -> int:
 
     session = read_session(path)
     turns = turns_of(session["records"])
-    config = load_config()
+    config = load_config(args.config)
+    if args.long_threshold is not None:
+        config["long_context"] = {
+            **(config.get("long_context") or {}),
+            "threshold_tokens": args.long_threshold,
+        }
     model = session.get("model")
     rates = rates_for(model, parse_prices(args.prices, config))
     session["window"] = args.window or window_for(model, config, session["meta"])
@@ -348,7 +444,9 @@ def main(argv=None) -> int:
                         "output": sum(t["output"] for t in turns),
                         "cached": sum(t["cached"] for t in turns),
                     },
-                    "estimated_usd": estimate(turns, rates),
+                    "estimated_usd": estimate(turns, rates, config),
+                    "rates": rates,
+                    "long_context": long_context(config),
                     "rate_source": CONFIG_PATH if os.path.exists(CONFIG_PATH) else None,
                 },
                 indent=1,
@@ -361,13 +459,33 @@ def main(argv=None) -> int:
         sess2 = read_session(path2) if path2 else session
         turns2 = turns_of(sess2["records"])
         sess2["window"] = args.window or window_for(sess2.get("model"), config, sess2["meta"])
-        print(band_line(sess2, turns2, rates))
+        print(band_line(sess2, turns2, rates, config))
         if args.ledger:
             print()
-            for row in ledger_lines(turns2, rates):
+            for row in ledger_lines(turns2, rates, config):
                 print(row)
         if not rates:
             print("(no price rates set — pass --prices or write ~/.codex/context-bar.json)")
+
+    if args.card:
+        import hashlib
+        import time as _time
+
+        stamp = _time.strftime("%Y-%m-%d/%H%M%S")
+        out = args.card_out or os.path.join(
+            os.path.expanduser("~/.codex/visualizations"),
+            _time.strftime("%Y/%m/%d"),
+            (session["meta"].get("id") or "session") + "-" + str(int(_time.time() % 100000)),
+            f"context-bar-{stamp}.html",
+        )
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        html = card_html(session, turns, rates, config)
+        with open(out, "w", encoding="utf-8") as fh:
+            fh.write(html)
+        # Codex renders this line as an inline card; the host owns the frame.
+        print(f'::codex-inline-vis{{file="{out}"}}')
+        print(f"# wrote {out} ({len(html)} bytes, sha256 {hashlib.sha256(html.encode()).hexdigest()[:12]})")
+        return 0
 
     draw()
 
@@ -383,6 +501,125 @@ def main(argv=None) -> int:
         except KeyboardInterrupt:
             print()
     return 0
+
+
+
+
+# ---------- the inline card -------------------------------------------------
+
+
+def card_html(session: dict, turns: list[dict], rates, config: dict) -> str:
+    """A self-contained HTML fragment Codex renders inline in the conversation.
+
+    It is a FRAGMENT: no doctype/html/head/body, no fetch, no external assets —
+    that is what the desktop's inline renderer accepts. The palette comes from
+    CSS variables the host sets, with fallbacks so the file also opens in a
+    browser.
+    """
+    window = session.get("window") or 0
+    last = turns[-1] if turns else None
+    context = last["context_tokens"] if last else 0
+    percent = (context / window * 100) if window else 0
+    icon, word, _ = weather_for(percent)
+    est = estimate(turns, rates, config)
+    model = session.get("model") or "?"
+    sent = sum(t["input"] for t in turns)
+    got = sum(t["output"] for t in turns)
+    cached = sum(t["cached"] for t in turns)
+    max_ctx = max([t["context_tokens"] for t in turns] + [1])
+    lc = long_context(config)
+
+    def esc(v) -> str:
+        return (
+            str(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+        )
+
+    # A bar per turn: how full the window was, and what the turn cost.
+    per_turn = []
+    show = turns[-SPARK_TURNS:]
+    cost_peak = max([(estimate([t], rates, config) or 0) for t in show] + [1e-9])
+    for i, t in enumerate(show, len(turns) - len(show) + 1):
+        pct = (t["context_tokens"] / window * 100) if window else 0
+        cost = estimate([t], rates, config)
+        heat = (cost or 0) / cost_peak if rates else t["context_tokens"] / max_ctx
+        rows = [
+            f'<div class="row">',
+            f'<span class="idx">{i}</span>',
+            f'<span class="bar" title="{t["context_tokens"]} tokens"><i style="width:'
+            f'{max(2, min(100, pct)):.1f}%;opacity:{0.35 + 0.65 * heat:.2f}"></i></span>',
+            f'<span class="num">{compact(t["context_tokens"])}/{compact(window)}</span>',
+            f'<span class="num dim">in {compact(t["input"])}</span>',
+            f'<span class="num dim">out {compact(t["output"])}</span>',
+            f'<span class="num dim">↺{compact(t["cached"])}</span>',
+            f'<span class="num dim">{t["calls"]} call{"s" if t["calls"] != 1 else ""}</span>',
+        ]
+        if cost is not None:
+            rows.append(f'<span class="cost">{money(cost)}</span>')
+        rows.append("</div>")
+        per_turn.append("".join(rows))
+
+    tiles = [
+        ("context", f'{compact(context)} / {compact(window)}', f"{percent:.1f}%"),
+        ("session in", compact(sent), f"↺{compact(cached)} cached"),
+        ("session out", compact(got), ""),
+    ]
+    if est is not None:
+        tiles.append(("estimated cost", money(est), "list rates"))
+    if lc["threshold"]:
+        tiles.append(("long-context", f">{compact(lc['threshold'])}", f"{lc['in_mult']:g}x in / {lc['out_mult']:g}x out"))
+    tiles.append(("model", model, f"{len(turns)} turn{'s' if len(turns) != 1 else ''}"))
+
+    tile_html = "".join(
+        f'<div class="tile"><span class="k">{esc(k)}</span>'
+        f'<span class="v">{esc(v)}</span>'
+        + (f'<span class="s">{esc(s)}</span>' if s else "")
+        + "</div>"
+        for k, v, s in tiles
+    )
+
+    legend = "estimated from " + (
+        "rates you set" if rates else "no rates set — tokens only"
+    ) + " · bars show each turn's context, darkened by its cost"
+
+    return f"""<div id="codex-context-bar" class="ccb">
+<style>
+  .ccb {{ --ccb-good:#3fb950; --ccb-mid:#d29922; --ccb-bad:#f85149; --ccb-line:var(--border, #2a2f36);
+         font: 13px/1.45 ui-sans-serif, -apple-system, system-ui, sans-serif;
+         color: var(--foreground, #e6e6e6); display:flex; flex-direction:column; gap:10px; }}
+  .ccb .head {{ display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }}
+  .ccb .wx {{ font-weight:600; }}
+  .ccb .pct {{ font-variant-numeric: tabular-nums; opacity:.85; }}
+  .ccb .spark {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; opacity:.75; letter-spacing:1px; }}
+  .ccb .tiles {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:8px; }}
+  .ccb .tile {{ border:1px solid var(--ccb-line); border-radius:8px; padding:7px 9px;
+                display:flex; flex-direction:column; gap:2px; }}
+  .ccb .k {{ font-size:10px; letter-spacing:.08em; text-transform:uppercase; opacity:.55; }}
+  .ccb .v {{ font-size:15px; font-variant-numeric: tabular-nums; }}
+  .ccb .s {{ font-size:11px; opacity:.55; }}
+  .ccb .rows {{ display:flex; flex-direction:column; gap:3px; }}
+  .ccb .row {{ display:grid; grid-template-columns: 1.6em minmax(60px,2.4fr) 6.5em 5em 4.5em 5em 4.5em 4.5em;
+               align-items:center; gap:6px; font-size:12px; }}
+  .ccb .row:hover {{ background:color-mix(in srgb, currentColor 6%, transparent); border-radius:4px; }}
+  .ccb .idx {{ opacity:.45; text-align:right; font-variant-numeric: tabular-nums; }}
+  .ccb .bar {{ height:8px; border-radius:4px; background:color-mix(in srgb, currentColor 12%, transparent);
+               overflow:hidden; }}
+  .ccb .bar i {{ display:block; height:100%; background:currentColor; }}
+  .ccb .num {{ font-variant-numeric: tabular-nums; }}
+  .ccb .dim {{ opacity:.6; }}
+  .ccb .cost {{ font-variant-numeric: tabular-nums; text-align:right; }}
+  .ccb .legend {{ font-size:11px; opacity:.5; }}
+</style>
+  <div class="head">
+    <span class="wx">{esc(icon)} {esc(word)}</span>
+    <span class="pct">{percent:.1f}%</span>
+    <span class="num">{compact(context)} / {compact(window)}</span>
+    <span class="spark">{esc(sparkline(turns))}</span>
+  </div>
+  <div class="tiles">{tile_html}</div>
+  <div class="rows">{"".join(per_turn)}</div>
+  <div class="legend">{esc(legend)}</div>
+</div>
+"""
 
 
 if __name__ == "__main__":

@@ -89,7 +89,7 @@ def build_rollout(path: str) -> None:
 
 def run(rollout: str, *args: str) -> dict:
     out = subprocess.run(
-        [sys.executable, SCRIPT, "--session", rollout, "--json", *args],
+        [sys.executable, SCRIPT, "--session", rollout, "--config", "none", "--json", *args],
         capture_output=True, text=True, check=True,
     )
     return json.loads(out.stdout)
@@ -124,11 +124,27 @@ def main() -> int:
                 problems.append(f"{name}: got {got!r}, want {want!r}")
 
         # $1/Mtok in, $10/Mtok out, $0.10/Mtok cached.
-        priced = run(rollout, "--prices", "gpt-6=1/10/0.1")
+        priced = run(rollout, "--prices", "gpt-6-luna=1/10/0.1")
         # 112000 in of which 104000 cached, 1200 out
         want = (112000 - 104000) / 1e6 * 1 + 104000 / 1e6 * 0.1 + 1200 / 1e6 * 10
         if priced["estimated_usd"] is None or abs(priced["estimated_usd"] - want) > 1e-9:
             problems.append(f"cost: got {priced['estimated_usd']!r}, want {want!r}")
+
+        # A long-context request bills the whole turn at the multiplier. The
+        # synthetic last call is 50000, so a 40000 threshold catches turn 2.
+        lc = run(
+            rollout,
+            "--prices", "gpt-6-luna=1/10/0.1",
+            "--long-threshold", "40000",
+        )
+        want_lc = (
+            (22000 - 17000) / 1e6 * 1 + 17000 / 1e6 * 0.1 + 300 / 1e6 * 10  # turn 1: plain
+            + (90000 - 87000) / 1e6 * 1 * 2 + 87000 / 1e6 * 0.1 * 2 + 900 / 1e6 * 10 * 1.5  # turn 2: 2x/1.5x
+        )
+        if abs((lc["estimated_usd"] or 0) - want_lc) > 1e-9:
+            problems.append(f"long-context cost: got {lc['estimated_usd']!r}, want {want_lc!r}")
+        if lc.get("long_context", {}).get("threshold") != 40000:
+            problems.append(f"long_context.threshold: got {lc.get('long_context')!r}")
 
         # A window override beats every table.
         forced = run(rollout, "--window", "100000")
@@ -137,7 +153,8 @@ def main() -> int:
 
         # The bar prints one line and names the model.
         band = subprocess.run(
-            [sys.executable, SCRIPT, "--session", rollout, "--prices", "gpt-6=1/10/0.1"],
+            [sys.executable, SCRIPT, "--session", rollout, "--config", "none",
+             "--prices", "gpt-6-luna=1/10/0.1"],
             capture_output=True, text=True, check=True,
         ).stdout.strip().splitlines()
         if len(band) != 1:

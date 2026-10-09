@@ -1,6 +1,6 @@
 {
   "name": "codex-context-bar",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Context bar for Codex: context window fill, tokens in/out per turn, cached tokens, and estimated cost, read from the session rollout.",
   "author": {
     "name": "Rendi Febrian"
@@ -20,7 +20,7 @@
   "interface": {
     "displayName": "Context Bar",
     "shortDescription": "See the context window, tokens in/out and cost",
-    "longDescription": "Reports this session's context window fill as a one-line bar with weather, tokens used out of the window, a sparkline of the last 12 turns, the current turn's input and output tokens, cached tokens, and an estimated cost from rates you give it. Reads the session's own rollout file under ~/.codex/sessions, so it costs nothing but the read. Adds a per-turn ledger on request.",
+    "longDescription": "Reports the session's context window fill, tokens in/out per turn, cached tokens and estimated cost. Ships a one-line bar, a per-turn ledger, and an inline card rendered in the conversation. Reads the session's own rollout under ~/.codex/sessions, so it costs nothing but the read.",
     "developerName": "Rendi Febrian",
     "category": "Developer Tools",
     "capabilities": [
@@ -31,8 +31,8 @@
     "termsOfServiceURL": "https://github.com/rendi-febrian/codex-mods",
     "defaultPrompt": [
       "Show the context bar for this session",
-      "How full is my context window and what has this session cost?",
-      "Break down this session's tokens per turn"
+      "Show my context usage as a card",
+      "Break down this session's tokens and cost per turn"
     ],
     "brandColor": "#8B5E34",
     "composerIcon": "./assets/icon.svg",

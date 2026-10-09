@@ -35,11 +35,11 @@ Python 3 only, standard library only, no network.
 
 ## The inline card
 
-`--card` writes a self-contained HTML **fragment** to the thread's
-visualizations directory and prints one line:
+`--card` writes a self-contained HTML **fragment** into the thread's own
+visualizations folder and prints one line:
 
 ```
-::codex-inline-vis{file="/Users/…/context-bar-….html"}
+::codex-inline-vis{file="/Users/…/visualizations/<Y>/<M>/<D>/<threadId>/context-bar-<HHMMSS>.html"}
 ```
 
 Codex's desktop app renders that line as an inline card: a header with the
@@ -47,10 +47,18 @@ weather and window, tiles for context / session in / session out / cost / model,
 and one row per turn with a bar, the turn's tokens, its call count, and its own
 cost.
 
-The host is strict about the shape — the fragment must have no `<!doctype>`,
-`<html>`, `<head>`, `<body>`, `fetch`/XHR, or external resources, and the
-reference must be the only thing on its line. `--card` produces exactly that,
-which is why the skill tells the model to run it rather than hand-write HTML.
+Two things the host is strict about, both read out of its own code:
+
+- **The path is not taken at face value.** Only the basename is kept, and the
+  directory is rebuilt as
+  `join(codexHome, "visualizations", <Y>/<M>/<D>, <threadId>)`. The card must sit
+  in the thread's own folder, with a name matching
+  `^[a-z0-9]+(?:-[a-z0-9]+)*\.html$`. `--card` derives both from the rollout;
+  `--thread <id>` overrides the folder.
+- **The file must be a fragment**: no `<!doctype>`, `<html>`, `<head>`,
+  `<body>`, `fetch`/XHR, or external resources. `--card` produces exactly that,
+  which is why the skill tells the model to run it rather than hand-write HTML.
+
 Open the file in a browser if you want a closer look; the host's own frame is
 what styles it in the app.
 

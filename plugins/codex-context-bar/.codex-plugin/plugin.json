@@ -1,6 +1,6 @@
 {
   "name": "codex-context-bar",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Context bar for Codex: context window fill, tokens in/out per turn, cached tokens, and estimated cost, read from the session rollout.",
   "author": {
     "name": "Rendi Febrian"

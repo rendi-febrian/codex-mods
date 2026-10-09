@@ -24,27 +24,35 @@ python3 scripts/context_bar.py --watch 5        # redraw every 5 seconds
 
 ## The card (prefer this when the user wants to *see* it)
 
-`--card` writes an HTML fragment to the thread's visualizations directory and
+`--card` writes the fragment into the **thread's own** visualization folder and
 prints exactly one line:
 
 ```
-::codex-inline-vis{file="/Users/…/context-bar-….html"}
+::codex-inline-vis{file="/Users/…/visualizations/<Y>/<M>/<D>/<threadId>/context-bar-<HHMMSS>.html"}
 ```
 
-Codex's desktop app renders that line as an inline card in the conversation, so
-the numbers get a panel with tiles, bars per turn, and the cost column instead
-of a wall of text. Three rules make it work:
+Codex's desktop app renders that line as an inline card in the conversation.
+The host does not trust the path it is given: it keeps only the file's
+**basename** and rebuilds the directory as
+`join(codexHome, "visualizations", <Y>/<M>/<D>, <threadId>)`, where the date
+comes from the thread itself. So the file must land in the thread's own folder
+and its name must match `^[a-z0-9]+(?:-[a-z0-9]+)*\.html$`. `--card` derives
+both from the rollout (the thread id is `session_meta.id`), which is why it is
+the only supported way to produce one — do not hand-write the path or the HTML.
+
+`--thread <id>` overrides the folder when posting about another session.
+
+Also required:
 
 - Emit the reference line **by itself**, nothing else on that line, in your
   final response for the turn — not in commentary or progress updates.
 - The file must be an HTML **fragment**: no `<!doctype>`, `<html>`, `<head>` or
-  `<body>`, no `fetch`/XHR, no external resources. `--card` already produces
-  that shape; do not hand-write a different one.
+  `<body>`, no `fetch`/XHR, no external resources.
 - Do not call the card an artifact, attachment, or download, and do not also
   paste a table of the same numbers. One short sentence plus the line.
 
-If the reference line is not the whole line, or the file is not a fragment, the
-host falls back to showing the raw text.
+Get any of that wrong and the host falls back to showing the reference as raw
+text.
 
 ## What the numbers mean
 

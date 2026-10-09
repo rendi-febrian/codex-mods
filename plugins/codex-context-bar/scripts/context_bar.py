@@ -42,6 +42,7 @@ import glob
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 
 SESSIONS_ROOT = os.path.expanduser("~/.codex/sessions")
@@ -402,6 +403,7 @@ def main(argv=None) -> int:
         help="override the long-context threshold in tokens (0 disables it)",
     )
     parser.add_argument("--card", action="store_true", help="write the inline card and print its reference")
+    parser.add_argument("--thread", help="thread id for the card's folder (default: the rollout's own id)")
     parser.add_argument("--card-out", help="where to write the card (default: the thread's visualizations dir, else cwd)")
     parser.add_argument("--watch", type=float, metavar="SECONDS", help="redraw every N seconds")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
@@ -469,20 +471,20 @@ def main(argv=None) -> int:
 
     if args.card:
         import hashlib
-        import time as _time
 
-        stamp = _time.strftime("%Y-%m-%d/%H%M%S")
-        out = args.card_out or os.path.join(
-            os.path.expanduser("~/.codex/visualizations"),
-            _time.strftime("%Y/%m/%d"),
-            (session["meta"].get("id") or "session") + "-" + str(int(_time.time() % 100000)),
-            f"context-bar-{stamp}.html",
-        )
+        stamp = time.strftime("%H%M%S")
+        try:
+            out = args.card_out or card_path(session, args.thread, stamp)
+        except ValueError as err:
+            print(f"cannot place the card: {err}", file=sys.stderr)
+            return 2
         os.makedirs(os.path.dirname(out), exist_ok=True)
         html = card_html(session, turns, rates, config)
         with open(out, "w", encoding="utf-8") as fh:
             fh.write(html)
-        # Codex renders this line as an inline card; the host owns the frame.
+        # Codex renders this line as an inline card. The host keeps only the
+        # basename and rebuilds the directory from the thread id, so the file
+        # must sit in the thread's own visualizations folder (card_path).
         print(f'::codex-inline-vis{{file="{out}"}}')
         print(f"# wrote {out} ({len(html)} bytes, sha256 {hashlib.sha256(html.encode()).hexdigest()[:12]})")
         return 0
@@ -490,8 +492,6 @@ def main(argv=None) -> int:
     draw()
 
     if args.watch:
-        import time
-
         try:
             while True:
                 time.sleep(max(1.0, args.watch))
@@ -503,6 +503,44 @@ def main(argv=None) -> int:
     return 0
 
 
+
+
+def card_path(session: dict, thread_id: str | None, stamp: str) -> str:
+    """Where the host will actually read the card from.
+
+    The desktop app does not use the path given — it keeps only the file's
+    BASENAME and rebuilds the directory itself:
+
+        join(codexHome, "visualizations", ...<YYYY/MM/DD>.split("/"), <threadId>)
+
+    so the file has to exist at exactly
+    `~/.codex/visualizations/<Y>/<M>/<D>/<threadId>/<name>.html`, with a name
+    matching `^[a-z0-9]+(?:-[a-z0-9]+)*\\.html$`. Anything else — a nested extra
+    folder, a name with underscores, a guessed thread id — makes the host
+    reject the reference and fall back to showing it as raw text.
+    """
+    home = os.path.expanduser("~/.codex")
+    tid = thread_id or session["meta"].get("id") or session["meta"].get("session_id")
+    started = session["meta"].get("timestamp") or ""
+    try:
+        day = started[:10] if started else ""
+        if not day or len(day) != 10:
+            raise ValueError(day)
+        y, m, d = day.split("-")
+    except (ValueError, AttributeError):
+        # Fall back to the thread id's own timestamp: it is a UUIDv7, whose
+        # first 48 bits are milliseconds since the epoch.
+        import datetime as _dt
+
+        try:
+            ms = int((tid or "").replace("-", "")[:12], 16)
+            at = _dt.datetime.fromtimestamp(ms / 1000)
+            y, m, d = f"{at:%Y}", f"{at:%m}", f"{at:%d}"
+        except (ValueError, TypeError):
+            y, m, d = time.strftime("%Y/%m/%d").split("/")
+    if not tid:
+        raise ValueError("no thread id in the session rollout")
+    return os.path.join(home, "visualizations", y, m, d, tid, f"context-bar-{stamp}.html")
 
 
 # ---------- the inline card -------------------------------------------------

@@ -151,6 +151,17 @@ def main() -> int:
         if forced["percent"] != 50.0:
             problems.append(f"--window: got {forced['percent']!r}, want 50.0")
 
+        # Rates: the most specific key wins, not the first or last in the file.
+        # A table with both `gpt-6` and `gpt-6-luna` must bill `gpt-6-luna`.
+        # Session totals: 112000 in of which 104000 cached, 1200 out.
+        specific = run(rollout, "--config", "none",
+                       "--prices", "gpt-6=2/10/0.2,gpt-6-luna=1/5/0.1")
+        want_specific = (112000 - 104000) / 1e6 * 1 + 104000 / 1e6 * 0.1 + 1200 / 1e6 * 5
+        if abs(specific["estimated_usd"] - want_specific) > 1e-9:
+            problems.append(
+                f"rate specificity: got {specific['estimated_usd']!r}, "
+                f"want {want_specific!r} (the longest key must win)")
+
         # The bar prints one line and names the model.
         band = subprocess.run(
             [sys.executable, SCRIPT, "--session", rollout, "--config", "none",

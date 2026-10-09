@@ -97,23 +97,32 @@ def read_session(path: str) -> dict:
     meta: dict = {}
     records: list[dict] = []
     turn_context: dict = {}
+    current: str | None = None
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
         for line in fh:
             if '"token_usage_record"' in line:
                 try:
-                    records.append(json.loads(line)["payload"])
+                    payload = json.loads(line)["payload"]
                 except (ValueError, KeyError):
                     continue
+                # A session can switch models, and `usage` does not name the
+                # model, so remember which one was in force for this call.
+                payload["_model"] = current
+                records.append(payload)
             elif '"session_meta"' in line and not meta:
                 try:
                     meta = json.loads(line)["payload"]
                 except (ValueError, KeyError):
                     continue
-            elif '"turn_context"' in line and not turn_context:
+            elif '"turn_context"' in line:
                 try:
-                    turn_context = json.loads(line)["payload"]
+                    ctx = json.loads(line)["payload"]
                 except (ValueError, KeyError):
                     continue
+                if not turn_context:
+                    turn_context = ctx
+                if ctx.get("model"):
+                    current = ctx["model"]
 
     # The model lives on the turn context; the window on the session meta.
     model = turn_context.get("model") or meta.get("model")
@@ -151,6 +160,7 @@ def turns_of(records: list[dict]) -> list[dict]:
             {
                 "turn_id": tid,
                 "calls": len(calls),
+                "model": (calls[-1].get("_model") or ""),
                 # What the window held on the turn's last call.
                 "context_tokens": usage.get("input_tokens") or 0,
                 "cached": cached,
@@ -207,13 +217,20 @@ def sparkline(turns: list[dict]) -> str:
 
 
 def rates_for(model: str | None, table: dict) -> list[float] | None:
-    """The most specific match wins; 'default' only when nothing else does."""
+    """The most specific match wins; 'default' only when nothing else does.
+
+    Specificity is the length of the matching key, not its position in the
+    file: with both `gpt-6` and `gpt-6-luna` present, `gpt-6-luna` must win
+    whatever order they were written in.
+    """
     if not table:
         return None
+    hit = None
     for key, value in table.items():
         if key != "default" and model and key.lower() in model.lower():
-            return value
-    return table.get("default")
+            if hit is None or len(key) > len(hit):
+                hit = key
+    return table[hit] if hit else table.get("default")
 
 
 def model_catalog() -> dict:
@@ -271,13 +288,25 @@ def estimate(turns: list[dict], rates, config: dict | None = None) -> float | No
 
     The multiplier is judged per request, and a turn's window is its last
     call's input side, so that is what the threshold is measured against.
+
+    `rates` may be a single list of rates or the whole table: with a table,
+    each turn is billed at the rate of the model that made it, so a session
+    that switched models mid-way is priced per call rather than all at one
+    model's rate. Returns None only when nothing at all matched.
     """
-    if not rates:
+    table = rates if isinstance(rates, dict) else None
+    single = None if table else rates
+    if not table and not single:
         return None
-    in_rate, out_rate, cached_rate = (list(rates) + [0, 0, 0])[:3]
     lc = long_context(config or {})
     total = 0.0
+    priced = False
     for t in turns:
+        r = rates_for(t.get("model"), table) if table else single
+        if not r:
+            continue
+        priced = True
+        in_rate, out_rate, cached_rate = (list(r) + [0, 0, 0])[:3]
         mult_in = mult_cached = mult_out = 1.0
         if lc["threshold"] and t["context_tokens"] > lc["threshold"]:
             mult_in, mult_cached, mult_out = lc["in_mult"], lc["cached_mult"], lc["out_mult"]
@@ -285,7 +314,7 @@ def estimate(turns: list[dict], rates, config: dict | None = None) -> float | No
         total += uncached / 1e6 * in_rate * mult_in
         total += t["cached"] / 1e6 * cached_rate * mult_cached
         total += t["output"] / 1e6 * out_rate * mult_out
-    return total
+    return total if priced else None
 
 
 def windows_table(config: dict) -> dict:
@@ -308,9 +337,13 @@ def window_for(model, config: dict, meta: dict) -> int:
     table = windows_table(config)
     if model and model in table:
         return int(table[model])
+    hit = None
     for key, value in table.items():
         if key != "default" and model and key.lower() in model.lower():
-            return int(value)
+            if hit is None or len(key) > len(hit):
+                hit = key
+    if hit:
+        return int(table[hit])
     return int(table.get("default", 0))
 
 

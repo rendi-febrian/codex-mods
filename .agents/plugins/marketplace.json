@@ -14,7 +14,20 @@
         "installation": "AVAILABLE",
         "authentication": "ON_INSTALL"
       },
-      "category": "Developer Tools"
+      "category": "Developer Tools",
+      "interface": {
+        "displayName": "Context Bar",
+        "shortDescription": "See the context window, tokens in/out and cost",
+        "longDescription": "A live readout of the session's context window: how full it is, tokens in/out, cached tokens, a sparkline of recent turns, and estimated cost.",
+        "developerName": "Rendi Febrian",
+        "category": "Developer Tools",
+        "capabilities": [
+          "Read"
+        ],
+        "defaultPrompt": [
+          "Show the context bar for this session"
+        ]
+      }
     }
   ]
 }
